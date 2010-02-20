@@ -47,22 +47,20 @@ define bytes->split(find::bytes, max::integer) => {
 
 
 define memcache => type {
-    data public servers::array
-    data public max_key_length::integer
-    data public max_value_length::integer
-    data public server_timeout::integer = 5
-    
-    data private _connection = net_tcp 
-    
-    public onCreate(servers::array, -max_key_length::integer=250, -max_value_length::integer=1024 * 1024) => {
-        .'servers' = #servers
-        (#max_key_length ? .'max_key_length' = #max_key_length)
-        (#max_value_length ? .'max_value_length' = #max_value_length)
-    }
-    
     private MAX_TTL_OFFSET => 60 * 60 * 24 * 30 //number of seconds in 30 days
-    private DEFAULT_TTL => 60 * 60
+    private MAX_KEY_LENGTH => 250
+    private MAX_VALUE_LENGTH => 1024 * 1024
     
+    data public servers::array
+    data public server_timeout::integer
+    data public DEFAULT_TTL = 60 * 60
+    
+    data private _connection = net_tcp
+    
+    public onCreate(servers::array, -server_timeout::integer=5) => {
+        .'servers' = #servers
+        .'server_timeout' = #server_timeout
+    }
     
     // Storage Commands
     public set(key::string, value::string, -expires::integer=.DEFAULT_TTL, -flags::integer=1) => {
@@ -112,6 +110,22 @@ define memcache => type {
     //public stats() => {}
     //public version() => {}
     
+    /**
+        Provides Key Validation.
+            - Key must be non-zero length
+            - Key must be ASCII
+            - Key must not contain a space or control characters
+    **/
+    private _validateKey(key::string) => {
+        
+        fail_if((#key->size < 1), error_code_invalidParameter, error_msg_invalidParameter)
+        
+        with c in #key->split('')
+        do {
+            fail_if((bytes(#c)->export8bits < 33 || bytes(#c)->export8bits > 126), 
+                error_code_invalidParameter, error_msg_invalidParameter + #key)
+        }
+    }
     
     private _serverHash(key::string) => {
         return bytes(#key)->crc
@@ -124,6 +138,7 @@ define memcache => type {
     }
     
     private _storeCommand(command::string, key::string, value::string, expires::integer, flags::integer) => {
+        ._validateKey(#key)
         local(server_pair) = ._findServer(#key)
         local(comm) = #command + ' ' + #key + ' ' + #flags + ' ' + #expires  + ' ' + bytes(#value)->size + '\r\n'
         .'_connection' = net_tcp
@@ -141,13 +156,14 @@ define memcache => type {
         Returns a map if there is a single key passed, otherwise an array of maps
     ***/
     private _retrievalCommand(command::string, key::string) => {
+        ._validateKey(#key)
         /*
-        *  Maximum # of bytes per key retrieved = 6 + max_key_length+1 + 11 + sizeOf(max_value_length)+1 + 20 + 2 + max_value_length + 2
+        *  Maximum # of bytes per key retrieved = 6 + MAX_KEY_LENGTH+1 + 11 + sizeOf(MAX_VALUE_LENGTH)+1 + 20 + 2 + MAX_VALUE_LENGTH + 2
         *  After all the items have been transmitted, the server sends the string "END\r\n"
         *  So last part is + 5 for total_max_bytes
         */
         local(num_keys) = #key->split(' ')->size
-        local(total_max_bytes) = #num_keys * (6 + .'max_key_length'+1 + 11 + .'max_value_length'->asString()->size+1 + 20 + 2 + .'max_value_length' + 2) + 5
+        local(total_max_bytes) = #num_keys * (6 + .MAX_KEY_LENGTH+1 + 11 + .MAX_VALUE_LENGTH->asString()->size+1 + 20 + 2 + .MAX_VALUE_LENGTH + 2) + 5
         local(result) = array
         local(server_pair) = ._findServer(#key)
         local(comm) = #command + ' ' + #key + '\r\n'
@@ -182,6 +198,7 @@ define memcache => type {
     }
     
     private _otherCommands(key::string, command::string, read_bytes::integer=0) => {
+        ._validateKey(#key)
         local(result)
         local(server_pair) = ._findServer(#key)
         local(comm) = #command + '\r\n'
