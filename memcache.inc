@@ -81,8 +81,10 @@ define memcache => type {
     public cas() => {}
     
     // Retriaval Commands
-    public get(key::string) => {return ._retrievalCommand('get', #key)}
-    public gets(key::string) => {return ._retrievalCommand('gets', #key)}
+    public get(key::string) => {return ._retrievalCommand('get', array(#key))}
+    public gets(key::string) => {return ._retrievalCommand('gets', array(#key))}
+    public get(keys::array) => {return ._retrievalCommand('get', #keys)}
+    public gets(keys::array) => {return ._retrievalCommand('gets', #keys)}
     
     // Other Data Commands
     public delete(key::string, time::integer=0) => {
@@ -151,49 +153,64 @@ define memcache => type {
         return #result
     }
     
+    
     /***
         This does the heavy-lifting of geting values out of memcached
         Returns a map if there is a single key passed, otherwise an array of maps
     ***/
-    private _retrievalCommand(command::string, key::string) => {
-        ._validateKey(#key)
-        /*
-        *  Maximum # of bytes per key retrieved = 6 + MAX_KEY_LENGTH+1 + 11 + sizeOf(MAX_VALUE_LENGTH)+1 + 20 + 2 + MAX_VALUE_LENGTH + 2
-        *  After all the items have been transmitted, the server sends the string "END\r\n"
-        *  So last part is + 5 for total_max_bytes
-        */
-        local(num_keys) = #key->split(' ')->size
-        local(total_max_bytes) = #num_keys * (6 + .MAX_KEY_LENGTH+1 + 11 + .MAX_VALUE_LENGTH->asString()->size+1 + 20 + 2 + .MAX_VALUE_LENGTH + 2) + 5
+    private _retrievalCommand(command::string, keys::array) => {
         local(result) = array
-        local(server_pair) = ._findServer(#key)
-        local(comm) = #command + ' ' + #key + '\r\n'
-        .'_connection' = net_tcp
-        .'_connection'->connect(#server_pair->first, #server_pair->second, .'server_timeout')
-        .'_connection'->writeBytes(bytes(#comm))
-        local(blob) = .'_connection'->readSomeBytes(#total_max_bytes, 5)
-        .'_connection'->close
-        
-        loop(#num_keys) => {
-            local(tmp_result) = map
-            local(value_size)
-            #blob = #blob->split(bytes('\r\n'), 1)
-            local(line) = #blob->get(1)->split(' ')
-            #blob = #blob->get(2)
-            
-            if(#line->get(1) == bytes('END\r\n')) => {
-                loop_abort
-            else(#line->get(1) != 'VALUE')
-                //TODO: Raise an error for unexpected happenstance
-                loop_abort
+        local(servers) = map
+        with key in #keys
+        do {
+            ._validateKey(#key)
+            local(server_pair) = ._findServer(#key)
+            if(#servers->find(#server_pair->first)) => {
+                #servers->find(#server_pair->first)->find('keys')->insert(#key)
+            else
+                #servers->insert(#server_pair->first=map('ip'=#server_pair->first, 'port'=#server_pair->second, 'keys'=array(#key)))
             }
-            #tmp_result->insert('key'=string(#line->get(2)))
-            #tmp_result->insert('flags'=integer(#line->get(3)))
-            #value_size = integer(#line->get(4))
-            #tmp_result->insert('cas'=(#line->size >= 5 ? integer(#line->get(5)) | void))
-            #tmp_result->insert('value'=string(#blob->sub(1, #value_size)))
-            #blob = #blob->sub(#value_size + 3)
-            #result->insert(#tmp_result)
         }
+        
+        with server in #servers
+        do {
+            local(comm) = #command + ' ' + #server->find('keys')->join(' ') + '\r\n'
+            local(num_keys) = #server->find('keys')->size
+            // Maximum # of bytes per key retrieved = 6 + MAX_KEY_LENGTH+1 + 11 + sizeOf(MAX_VALUE_LENGTH)+1 + 20 + 2 + MAX_VALUE_LENGTH + 2
+            // After all the items have been transmitted, the server sends the string "END\r\n"
+            // So last part is + 5 for total_max_bytes
+            local(total_max_bytes) = #num_keys * (6 + .MAX_KEY_LENGTH+1 + 11 + .MAX_VALUE_LENGTH->asString()->size+1 + 20 + 2 + .MAX_VALUE_LENGTH + 2) + 5
+            
+            .'_connection' = net_tcp
+            .'_connection'->connect(#server->find('ip'), #server->find('port'), .'server_timeout')
+            .'_connection'->writeBytes(bytes(#comm))
+            local(blob) = .'_connection'->readSomeBytes(#total_max_bytes, 5)
+            .'_connection'->close
+            
+            // Deal with the results
+            loop(#num_keys) => {
+                local(tmp_result) = map
+                local(value_size)
+                #blob = #blob->split(bytes('\r\n'), 1)
+                local(line) = #blob->get(1)->split(' ')
+                #blob = #blob->get(2)
+
+                if(#line->get(1) == bytes('END\r\n')) => {
+                    loop_abort
+                else(#line->get(1) != 'VALUE')
+                    //TODO: Raise an error for unexpected happenstance
+                    loop_abort
+                }
+                #tmp_result->insert('key'=string(#line->get(2)))
+                #tmp_result->insert('flags'=integer(#line->get(3)))
+                #value_size = integer(#line->get(4))
+                #tmp_result->insert('cas'=(#line->size >= 5 ? integer(#line->get(5)) | void))
+                #tmp_result->insert('value'=string(#blob->sub(1, #value_size)))
+                #blob = #blob->sub(#value_size + 3)
+                #result->insert(#tmp_result)
+            }
+        }
+        
         return (#result->size == 1 ? #result->get(1) | (#result->size == 0 ? void | #result))
     }
     
