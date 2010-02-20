@@ -16,6 +16,7 @@ Copyright 2010 Bradley Lindsay
 
 /***
     Extending the bytes type so that I can give it a maximum split value
+    (Code is adapted from Lasso 9 source)
 ***/
 define bytes->split(find::bytes, max::integer) => {
     local(num_splits = 0)
@@ -78,7 +79,9 @@ define memcache => type {
     public prepend(key::string, value::string, -expires::integer=.DEFAULT_TTL, -flags::integer=1) => {
         ._storeCommand('prepend', #key, #value, #expires, #flags)
     }
-    public cas() => {}
+    public cas(key::string, value::string, cas::integer, -expires::integer=.DEFAULT_TTL, -flags::integer=1) => {
+        ._storeCommand('cas', #key, #value, #expires, #flags, #cas)
+    }
     
     // Retriaval Commands
     public get(key::string) => {return ._retrievalCommand('get', array(#key))}
@@ -125,7 +128,7 @@ define memcache => type {
         with c in #key->split('')
         do {
             fail_if((bytes(#c)->export8bits < 33 || bytes(#c)->export8bits > 126), 
-                error_code_invalidParameter, error_msg_invalidParameter + #key)
+                error_code_invalidParameter, error_msg_invalidParameter)
         }
     }
     
@@ -139,10 +142,15 @@ define memcache => type {
         return #result
     }
     
-    private _storeCommand(command::string, key::string, value::string, expires::integer, flags::integer) => {
+    private _storeCommand(command::string, key::string, value::string, expires::integer, flags::integer, cas=null) => {
         ._validateKey(#key)
         local(server_pair) = ._findServer(#key)
-        local(comm) = #command + ' ' + #key + ' ' + #flags + ' ' + #expires  + ' ' + bytes(#value)->size + '\r\n'
+        local(comm) = #command + ' ' + #key + ' ' + #flags + ' ' + #expires  + ' ' + bytes(#value)->size
+        if(#command == 'cas') => {
+            fail_if(!#cas->isA(::integer), error_code_invalidParameter, error_msg_invalidParameter)
+            #comm += ' ' + #cas
+        }
+        #comm += '\r\n'
         .'_connection' = net_tcp
         .'_connection'->connect(#server_pair->first, #server_pair->second, .'server_timeout')
         .'_connection'->writeBytes(bytes(#comm))
