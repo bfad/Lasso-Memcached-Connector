@@ -112,8 +112,11 @@ define memcache => type {
         However, the client may also simply close the connection when it no longer needs it, 
         without issuing this command.*/
     }
+    public version() => {
+        return ._allServersCommand('version', 20)
+    }
     //public stats() => {}
-    //public version() => {}
+    
     
     /**
         Provides Key Validation.
@@ -235,13 +238,18 @@ define memcache => type {
         return #result
     }
     
-    private _allServersCommand(command::string) => {
+    private _allServersCommand(command::string, read_bytes::integer=0) => {
+        local(result) = array
         local(comm) = #command + '\r\n'
         iterate(.'servers', local(server)) => {
             .'_connection' = net_tcp
             .'_connection'->connect(#server->split(':')->get(1), integer(#server->split(':')->get(2)))
             .'_connection'->writeBytes(bytes(#comm))
+            if(#read_bytes > 0) => {
+                #result->insert(string(.'_connection'->readSomeBytes(#read_bytes, .'server_timeout')))
+            }
             .'_connection'->close
         }
+        (#read_bytes > 0 ? return #result)
     }
 }
