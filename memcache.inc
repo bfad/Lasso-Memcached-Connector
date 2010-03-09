@@ -52,15 +52,21 @@ define memcache => type {
     private MAX_KEY_LENGTH => 250
     private MAX_VALUE_LENGTH => 1024 * 1024
     
-    data public servers::array
+    data private servers::array
     data public server_timeout::integer
     data public DEFAULT_TTL = 60 * 60
     
-    data private _connection = net_tcp
-    
     public onCreate(servers::array, -server_timeout::integer=5) => {
-        .'servers' = #servers
+        .'servers' = array
         .'server_timeout' = #server_timeout
+        with server in #servers
+        do {
+            local(conn) = net_tcp
+            local(ip) = #server->split(':')->get(1)
+            local(port) = integer(#server->split(':')->get(2))
+            #conn->connect(#ip, #port, .'server_timeout')
+            .'servers'->insert(map('ip'=#ip, 'port'=#port, 'conn'=#conn))
+        }
     }
     
     // Storage Commands
@@ -139,27 +145,22 @@ define memcache => type {
         return bytes(#key)->crc
     }
     private _findServer(key::string) => {
-        local(server_index) = (._serverHash(#key) % .'servers'->size) + 1
-        local(result) = .'servers'->get(#server_index)->split(':')
-        #result = pair(#result->get(1), integer(#result->get(2)))
-        return #result
+        return (._serverHash(#key) % .'servers'->size) + 1
     }
     
     private _storeCommand(command::string, key::string, value::string, expires::integer, flags::integer, cas=null) => {
         ._validateKey(#key)
-        local(server_pair) = ._findServer(#key)
+        local(server_index) = ._findServer(#key)
         local(comm) = #command + ' ' + #key + ' ' + #flags + ' ' + #expires  + ' ' + bytes(#value)->size
         if(#command == 'cas') => {
             fail_if(!#cas->isA(::integer), error_code_invalidParameter, error_msg_invalidParameter)
             #comm += ' ' + #cas
         }
         #comm += '\r\n'
-        .'_connection' = net_tcp
-        .'_connection'->connect(#server_pair->first, #server_pair->second, .'server_timeout')
-        .'_connection'->writeBytes(bytes(#comm))
-        .'_connection'->writeBytes(bytes(#value + "\r\n"))
-        local(result) = string(.'_connection'->readSomeBytes(1024, 5))
-        .'_connection'->close
+        local(conn) = .'servers'->get(#server_index)->find('conn')
+        #conn->writeBytes(bytes(#comm))
+        #conn->writeBytes(bytes(#value + "\r\n"))
+        local(result) = string(#conn->readSomeBytes(1024, 5))
         
         return #result
     }
@@ -175,11 +176,11 @@ define memcache => type {
         with key in #keys
         do {
             ._validateKey(#key)
-            local(server_pair) = ._findServer(#key)
-            if(#servers->find(#server_pair->first)) => {
-                #servers->find(#server_pair->first)->find('keys')->insert(#key)
+            local(server_index) = ._findServer(#key)
+            if(#servers->find(.'servers'->get(#server_index)->find('ip'))) => {
+                #servers->find(.'servers'->get(#server_index)->find('ip'))->find('keys')->insert(#key)
             else
-                #servers->insert(#server_pair->first=map('ip'=#server_pair->first, 'port'=#server_pair->second, 'keys'=array(#key)))
+                #servers->insert(.'servers'->get(#server_index)->find('ip')=map('index'=#server_index, 'keys'=array(#key)))
             }
         }
         
@@ -187,16 +188,14 @@ define memcache => type {
         do {
             local(comm) = #command + ' ' + #server->find('keys')->join(' ') + '\r\n'
             local(num_keys) = #server->find('keys')->size
+            local(conn) = .'servers'->get(#server->find('index'))->find('conn')
             // Maximum # of bytes per key retrieved = 6 + MAX_KEY_LENGTH+1 + 11 + sizeOf(MAX_VALUE_LENGTH)+1 + 20 + 2 + MAX_VALUE_LENGTH + 2
             // After all the items have been transmitted, the server sends the string "END\r\n"
             // So last part is + 5 for total_max_bytes
             local(total_max_bytes) = #num_keys * (6 + .MAX_KEY_LENGTH+1 + 11 + .MAX_VALUE_LENGTH->asString()->size+1 + 20 + 2 + .MAX_VALUE_LENGTH + 2) + 5
             
-            .'_connection' = net_tcp
-            .'_connection'->connect(#server->find('ip'), #server->find('port'), .'server_timeout')
-            .'_connection'->writeBytes(bytes(#comm))
-            local(blob) = .'_connection'->readSomeBytes(#total_max_bytes, 5)
-            .'_connection'->close
+            #conn->writeBytes(bytes(#comm))
+            local(blob) = #conn->readSomeBytes(#total_max_bytes, 5)
             
             // Deal with the results
             loop(#num_keys) => {
@@ -228,13 +227,12 @@ define memcache => type {
     private _otherCommands(key::string, command::string, read_bytes::integer=0) => {
         ._validateKey(#key)
         local(result)
-        local(server_pair) = ._findServer(#key)
+        local(conn) = .'servers'->get(._findServer(#key))->find('conn')
         local(comm) = #command + '\r\n'
-        .'_connection' = net_tcp
-        .'_connection'->connect(#server_pair->first, #server_pair->second, .'server_timeout')
-        .'_connection'->writeBytes(bytes(#comm))
-        #result = (#read_bytes > 0 ? string(.'_connection'->readSomeBytes(#read_bytes, .'server_timeout')) | null)
-        .'_connection'->close
+        
+        #conn->writeBytes(bytes(#comm))
+        #result = (#read_bytes > 0 ? string(#conn->readSomeBytes(#read_bytes, .'server_timeout')) | null)
+        
         return #result
     }
     
@@ -242,13 +240,11 @@ define memcache => type {
         local(result) = array
         local(comm) = #command + '\r\n'
         iterate(.'servers', local(server)) => {
-            .'_connection' = net_tcp
-            .'_connection'->connect(#server->split(':')->get(1), integer(#server->split(':')->get(2)))
-            .'_connection'->writeBytes(bytes(#comm))
+            local(conn) = #server->find('conn')
+            #conn->writeBytes(bytes(#comm))
             if(#read_bytes > 0) => {
-                #result->insert(string(.'_connection'->readSomeBytes(#read_bytes, .'server_timeout')))
+                #result->insert(string(#conn->readSomeBytes(#read_bytes, .'server_timeout')))
             }
-            .'_connection'->close
         }
         (#read_bytes > 0 ? return #result)
     }
