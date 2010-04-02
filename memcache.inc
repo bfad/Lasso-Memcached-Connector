@@ -110,13 +110,20 @@ define memcache => type {
     public flush_all(delay::integer=0) => {._allServersCommand('flush_all ' + #delay + ' noreply')}
     public verbosity(level::integer) => {._allServersCommand('verbosity ' + #level + ' noreply')}
     public quit() => {
-        /* Pointless to ever issue this command (UNLESS WE CACHE THE CONNECTION (NEVER CLOSE))
+        /* Pointless to ever issue this command to the server
         From the Docs:
         "quit" is a command with no arguments:  quit\r\n
 
         Upon receiving this command, the server closes the connection. 
         However, the client may also simply close the connection when it no longer needs it, 
         without issuing this command.*/
+        
+        // So we'll just close the connections
+        with server in .'servers'
+        do {
+            #server->find('conn')->close
+            #server->find('conn') = null
+        }
     }
     public version() => {
         return ._allServersCommand('version', 20)
@@ -157,6 +164,10 @@ define memcache => type {
             #comm += ' ' + #cas
         }
         #comm += '\r\n'
+        if(.'servers'->get(#server_index)->find('conn') == null) => {
+            .'servers'->get(#server_index)->find('conn') = net_tcp
+            .'servers'->get(#server_index)->find('conn')->connect(.'servers'->get(#server_index)->find('ip'), .'servers'->get(#server_index)->find('port'), .'server_timeout')            
+        }
         local(conn) = .'servers'->get(#server_index)->find('conn')
         #conn->writeBytes(bytes(#comm))
         #conn->writeBytes(bytes(#value + "\r\n"))
@@ -188,6 +199,10 @@ define memcache => type {
         do {
             local(comm) = #command + ' ' + #server->find('keys')->join(' ') + '\r\n'
             local(num_keys) = #server->find('keys')->size
+            if(.'servers'->get(#server->find('index'))->find('conn') == null) => {
+                .'servers'->get(#server->find('index'))->find('conn') = net_tcp
+                .'servers'->get(#server->find('index'))->find('conn')->connect(.'servers'->get(#server->find('index'))->find('ip'), .'servers'->get(#server->find('index'))->find('port'), .'server_timeout')            
+            }
             local(conn) = .'servers'->get(#server->find('index'))->find('conn')
             // Maximum # of bytes per key retrieved = 6 + MAX_KEY_LENGTH+1 + 11 + sizeOf(MAX_VALUE_LENGTH)+1 + 20 + 2 + MAX_VALUE_LENGTH + 2
             // After all the items have been transmitted, the server sends the string "END\r\n"
@@ -227,6 +242,10 @@ define memcache => type {
     private _otherCommands(key::string, command::string, read_bytes::integer=0) => {
         ._validateKey(#key)
         local(result)
+        if(.'servers'->get(._findServer(#key))->find('conn') == null) => {
+            .'servers'->get(._findServer(#key))->find('conn') = net_tcp
+            .'servers'->get(._findServer(#key))->find('conn')->connect(.'servers'->get(._findServer(#key))->find('ip'), .'servers'->get(._findServer(#key))->find('port'), .'server_timeout')            
+        }
         local(conn) = .'servers'->get(._findServer(#key))->find('conn')
         local(comm) = #command + '\r\n'
         
@@ -240,6 +259,10 @@ define memcache => type {
         local(result) = array
         local(comm) = #command + '\r\n'
         iterate(.'servers', local(server)) => {
+            if(#server->find('conn') == null) => {
+                #server->find('conn') = net_tcp
+                #server->find('conn')->connect(#server->find('ip'), #server->find('port'), .'server_timeout')            
+            }
             local(conn) = #server->find('conn')
             #conn->writeBytes(bytes(#comm))
             if(#read_bytes > 0) => {
